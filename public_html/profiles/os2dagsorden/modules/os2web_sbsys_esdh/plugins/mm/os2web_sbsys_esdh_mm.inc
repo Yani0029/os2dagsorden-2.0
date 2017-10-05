@@ -41,27 +41,32 @@ function os2web_sbsys_esdh_mm_get_import_list() {
     $pub_id = (int) str_replace('Publication', '', $xml_file->name);
     $uris[] = array('id' => $pub_id, 'uri' => $xml_file->uri);
   }
-error_log(print_r($uris, 1));
   return $uris;
 }
 
 
 /**
- * Strip illegal characters from the XML. 
+ * Strip illegal characters from the XML.
  * Ex &#xC = ASCII new line feed
- * 
+ *
  * @param object $string
  *   string to sanitise
- * 
+ *
  * $return array
- *   The string sanitised 
+ *   The string sanitised
  */
 function utf8_for_xml($string)
 {
-    #$replace_me = "&#xC;";
-    $replace_me =  variable_get('os2web_sbsys_esdh_banned_special_char');
-    $str_new = str_replace($replace_me, "", $string);
-    return $str_new;
+  if (variable_get('os2web_sbsys_esdh_banned_activate_regex', FALSE)) {//using regex
+    $replace_me =  variable_get('os2web_sbsys_esdh_banned_special_regex','');
+    $str_new = preg_replace($replace_me, "", $string);
+  }
+  else {//using CSV list
+    $replace_me =  variable_get('os2web_sbsys_esdh_banned_special_char','');
+    $str_new = str_replace(explode(',', $replace_me), "", $string);
+  }
+
+  return $str_new;
 }
 
 /**
@@ -81,7 +86,7 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
   $meetings = array();
   if (is_file(drupal_realpath($file))) {
     libxml_use_internal_errors(true);
-    $manifest = simplexml_load_string(utf8_for_xml(file_get_contents(drupal_realpath($file))), 'SimpleXMLElement', LIBXML_NOCDATA); 
+    $manifest = simplexml_load_string(utf8_for_xml(file_get_contents(drupal_realpath($file))), 'SimpleXMLElement', LIBXML_NOCDATA);
     libxml_clear_errors();
     libxml_use_internal_errors(false);
 
@@ -101,32 +106,31 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
       $meeting_data = $manifest->xpath("/Publication/Agendas/Agenda/Meeting");
       $meeting_public = $manifest->xpath("/Publication/Agendas/Agenda/NewItemsIsPublic");
       $sys_id = $manifest->xpath("Agendas/Agenda/@ID");
+      $xml_id = $manifest->xpath("Agendas/Agenda/Meeting/@ID");
       $meeting_name = $manifest->xpath("/Publication/Agendas/Agenda/Name");
+      $meeting_name = (string) $meeting_name[0];
       $acadre_version = $manifest->xpath("/Publication/GeneratorSettings/@ID");
       $members = $manifest->xpath("Agendas/Agenda/Meeting/Members/MeetingMember");
-      
-      # if a meeting is kladde then it should not be published. So we need the meeting type early. 
       $meeting_type = $manifest->xpath('/Publication/PublicationTypeAsValue');
-      # end of type
+      switch (((string) $meeting_type[0])) {
+          case '0':
+            $meeting_type = 'Kladde';
+            break;
+          case '1':
+            $meeting_type = 'Dagsorden';
+            break;
+          case '2':
+            $meeting_type = 'Referat';
+            break;
+      }
 
       $committee = (string) $committee[0][ID];
       $committee_group_id = (string) $committee_group_id[0][ID];
       $committee_name = (string) $committee_name[0];
+      $meeting_name = $committee_name;
       $sys_id = (string) $sys_id[0][ID];
+      $xml_id = (string) $xml_id[0][ID];
       $meeting_public = (string) $meeting_public[0];
-
-      switch (((string) $meeting_type[0])){
-        case '0':
-          $meeting_type = 'Kladde';
-          return FALSE;
-          break;
-        case '1':
-          $meeting_type = 'Dagsorden';
-          break;
-        case '2':
-          $meeting_type = 'Referat';
-          break;
-      }
 
       $meeting_date_when = $meeting_data[0]->When;
       $meeting_date_until = $meeting_data[0]->Until;
@@ -137,12 +141,8 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
       $acadre_version = (string) $acadre_version[0][ID];
 
       $directory_name = dirname(drupal_realpath($file));
-      // Check if the committee is allowed to publish.
-      $publish_committee = array_map('trim', explode(',', variable_get('os2web_sbsys_esdh_approved_committees', MM_DEFAULT_APPROVED)));
-      if ($committee == '' || !in_array($committee, $publish_committee)) {
-        watchdog('SBsys MM', 'Ignored agenda from "%committee" .', array('%committee' => $committee));
-        return FALSE;
-      }
+      $dir_parts = explode('/',$directory_name);
+      $pdf = array_pop($dir_parts).".pdf";
 
       // Fix dates.
       $date_obj = date_create($meeting_date_when);
@@ -173,14 +173,16 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
       }
 
       $meeting = array(
-        'system_id' => $sys_id,
-        'meeting_id' => $sys_id,
+        'system_id' => $xml_id,
+        'meeting_id' => $xml_id,
         'committee' => $meeting_name,
         'committee_name' => $committee_name,
         'committee_id' => $committee,
         'committee_group_id' => $committee_group_id,
         'title' => $meeting_name,
         'uri' => strstr($file , $meeting_uri, TRUE),
+        'path' => drupal_realpath($file),
+        'pdf' => $pdf,
         'type' => $meeting_type,
         'meeting_date_start' => $meeting_date_when,
         'meeting_date_finish' => $meeting_date_until,
@@ -189,7 +191,7 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
         'participants' => $participants,
         'participants_cancellation' => $participants_cancellation,
       );
-
+     // var_dump($meeting);
       /*stan@bellcom.dk 06.10 - importing multiple agendas*/
       $meeting_agendas = array();
       foreach($manifest->xpath("/Publication/Agendas/Agenda") as $agenda_instance){
@@ -204,9 +206,10 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
           }
         }
       }
-      
+
       $meeting_pdf = $manifest->xpath('/Meeting/MeetingAgendaTypes/MeetingAgendaType/PDFDocument');
-      $meeting['pdf'] = (string) $meeting_pdf[0];
+      if(!empty($meeting_pdf))
+         $meeting['pdf'] = (string) $meeting_pdf[0];
       $meeting['state'] = (string) $meeting_state[0];
       if (empty($meeting_agendas)) {
         watchdog('SBsys MM', 'Empty list of import items in %file.', array('%file' => $file), WATCHDOG_WARNING);
@@ -216,6 +219,10 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
         $imported = _os2web_sbsys_esdh_mm_import_meeting_agenda($meeting, $meeting_agenda);
         if (is_array($imported)) {
           $imported['publish'] = TRUE;
+          $imported['meeting_sub_id'] = $sys_id;
+          //stan@bellcom.dk - 17.03.2016 
+          //forcing the agenda to be considered as closed, otherwise the closed BP will not be imported
+          $imported['agenda_access'] = 'Lukket';
           $meetings[] = $imported;
         }
       }
@@ -224,7 +231,8 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
       watchdog('SBsys MM', 'Failed to parse XML in %file during import.', array('%file' => $file), WATCHDOG_WARNING);
     }
   }
-  return $meetings;
+
+ return $meetings;
 }
 
 /**
@@ -240,15 +248,30 @@ function os2web_sbsys_esdh_mm_import_meeting($meeting) {
  *   Meeting_struct array for an accepted import, else FALSE
  */
 function _os2web_sbsys_esdh_mm_import_meeting_agenda(&$meeting, $agenda_xml) {
+  // Check if the committee is allowed to publish.
+  $publish_committee = array_map('trim', explode(',', variable_get('os2web_sbsys_esdh_approved_committees', MM_DEFAULT_APPROVED)));
+  if ($meeting['committee_id'] == '' || !in_array($meeting['committee_id'], $publish_committee)) {
+    watchdog('SBsys MM', 'Ignored agenda from "%committee" .', array('%committee' => $meeting['committee_id']));
+    return FALSE;
+  }
+
+  // Check meeting status
+  if ($meeting['type'] == 'Klade'){
+    watchdog('SBsys MM', 'Ignored DRAFT: Meeting %id is of type %type.', array('%id' => $meeting['system_id'], '%type' => $meeting['type']), WATCHDOG_WARNING);
+    return FALSE;
+  }
+
   $meeting['items'] = array();
   $agenda = $meeting;
-  // Only add the agenda if its PDF exists.
-  if (file_exists(drupal_realpath($meeting['uri'] . $meeting['pdf']))) {
-// There were no SBSYS meeting with meeting description, therefore disabled.  
-//     $agenda['full_doc'] = array(
-//       'uri' => $meeting['uri'] . $meeting['pdf'],
-//       'title' => $meeting['committee'],
-//     );
+
+  if (file_exists(drupal_realpath($meeting['uri']))) {
+// There were no SBSYS meeting with meeting description, therefore disabled.
+   if (file_exists(drupal_realpath($meeting['uri'] . $meeting['pdf']))) {
+    $agenda['full_doc'] = array(
+     'uri' => $meeting['uri'] . $meeting['pdf'],
+     'title' => $meeting['committee'],
+    );
+   }
     // Import all agenda items.
     $agenda_bullet = $agenda_xml;
     $meeting['current_item_nr'] = 1;
@@ -288,12 +311,19 @@ function _os2web_sbsys_esdh_mm_import_meeting_agenda_item($meeting, $xml) {
   $xml_item['name'] = (string) $xml->Caption;
   $xml_item['document_type'] = (string) $xml->IsPublic;
   $xml_item_participants = $xml->Members;
+  $xml_case_id = (string) $xml->ItemCaseNumber;
+
+  $case_text = '';
+  if (isset($xml_case_id)) {
+    $case_text = ' (' . $xml_case_id . ')';
+  }
 
   $item = array(
     'id' => $xml_item['number'],
     'sysid' => (string) $xml['ID'],
     //'title' => 'Punkt ' . $xml_item['number'] . ' ' . $xml_item['name'],06.10 stan@bellcom.dk commented to support multiple agendas
     'title' => 'Punkt ' . $meeting['current_item_nr'] . ' ' . $xml_item['name'],
+    'case_nr' => $xml_case_id,
     'access' => $xml_item['document_type'],
     'bullets' => array(),
     'enclosures' => array(),
@@ -309,69 +339,79 @@ function _os2web_sbsys_esdh_mm_import_meeting_agenda_item($meeting, $xml) {
   if ($item['access'] !== 'True') {
     //rewriting the access field to match esdh provider module
     $item['access'] = 'Lukket';
-  } else {
-    // Process attachments.
-    foreach ($xml_item_bullet->ItemField as $bullet_xml) {
-      
-      if (((string) $bullet_xml->HasContent) === 'True'){
-        $item['bullets'][] = array(
-          'title' => (string) $bullet_xml->Caption,
-          'body' => (string) $bullet_xml->Content,
-          'sysid' => (string) $bullet_xml['ID'],
+  }
+
+  // Process attachments.
+  foreach ($xml_item_bullet->ItemField as $bullet_xml) {
+
+    if (((string) $bullet_xml->HasContent) === 'True'){
+      $images = array();
+      foreach ($bullet_xml->Images->Image as $image) {
+        $images[] = array(
+          'name' => (string) $image->InstantiationFileName,
+          'path' => $meeting['uri'] . 'Images/' . ((string) $image->InstantiationFileName),
         );
       }
-    }
-   
-    // Process item history.
-    if (!empty($xml_item_history)) {
-      $history = array(
-        'title' => t('Beslutningshistorik'),
-        'body' => '',
+      $body = _os2web_sbsys_esdh_mm_improve_html((string) $bullet_xml->Content, $meeting['uri'] . 'Images/');
+      $item['bullets'][] = array(
+        'title' => !empty($bullet_xml->Caption)? (string) $bullet_xml->Caption : 'Indhold',
+        'body' => $body ,//(string) $bullet_xml->Content,
+        'sysid' => (string) $bullet_xml['ID'],
+        'images' => $images,
       );
-      foreach ($xml_item_history->ItemField as $item_history) {
+    }
+  }
 
-        if (((string) $item_history->HasContent) === 'True') {
-          $history['body'] .= t('@decision truffet af @comittee d. @date', array(
-            '@decision' => (string) $item_history->Caption,
-            '@comittee' => (string) $item_history->MeetingDetails->CommitteeName,
-            '@date'     => date('d-m-Y', strtotime((string) $item_history->MeetingDetails->MeetingDueDate)),
-          ));
-          $history['body'] .= '<br>' . strip_tags((string) $item_history->Content) . '<br>';
-        }
+  // Process item history.
+  if (!empty($xml_item_history)) {
+    $history = array(
+      'title' => t('Beslutningshistorik'),
+      'body' => '',
+    );
+    foreach ($xml_item_history->ItemField as $item_history) {
+
+      if (((string) $item_history->HasContent) === 'True') {
+        $history['body'] .= t('@decision truffet af @comittee d. @date', array(
+          '@decision' => (string) $item_history->Caption,
+          '@comittee' => (string) $item_history->MeetingDetails->CommitteeName,
+          '@date'     => date('d-m-Y', strtotime((string) $item_history->MeetingDetails->MeetingDueDate)),
+        ));
+        $history['body'] .= '<br>' . strip_tags((string) $item_history->Content) . '<br>';
       }
-      if ($history['body'] !== '') {
-        // If this is a Referat, put the history in before the beslutning element.
-        // Else just put in the buttom of the list.
-        if ($meeting['type'] === 'Referat') {
-          foreach($item['bullets'] as $key => $bullet) {
-            if ($bullet['title'] === 'Beslutning') {
-              array_splice( $item['bullets'], $key, 0, array($history) );
-              break;
-            }
+    }
+    if ($history['body'] !== '') {
+      // If this is a Referat, put the history in before the beslutning element.
+      // Else just put in the buttom of the list.
+      if ($meeting['type'] === 'Referat') {
+        foreach($item['bullets'] as $key => $bullet) {
+          if ($bullet['title'] === 'Beslutning') {
+            array_splice( $item['bullets'], $key, 0, array($history) );
+            break;
           }
         }
-        else {
-          $item['bullets'][] = $history;
-        }
+      }
+      else {
+        $item['bullets'][] = $history;
       }
     }
- 
-    // Process enclsures.
-    foreach ($xml_item_document as $enclosures) {
-      foreach ($enclosures->Enclosure as $enclosure) {
-        $enclosure_item['filename_in'] = (string) "Enclosures/".$enclosure->InstantiationFileName;
-        $enclosure_item['access'] = (string) $enclosure->PublishingType;
-        #if (strlen($enclosure_item['filename_in']) > 0 && $enclosure_item['access'] === 'SKAL PUBLICERES') {
-        if (strlen($enclosure_item['filename_in']) > 0 ) {
-          $item['enclosures'][] = array(
-            'uri' => implode('/', array(
-              trim($meeting['uri'], "/"),
-              $enclosure_item['filename_in'])),
-            'title' => trim((string) $enclosure->Name),
-            'access' => ((string)$enclosure->IsProtected) === 'True'? FALSE : TRUE, //inverting the value
-            'sysid' => (string) $enclosure['ID'],
-          );
-        }
+  }
+
+  // Process enclsures.
+  foreach ($xml_item_document as $enclosures) {
+    foreach ($enclosures->Enclosure as $enclosure) {
+      $enclosure_item['filename_in'] = (string) "Enclosures/".$enclosure->InstantiationFileName;
+      $enclosure_item['access'] = (string) $enclosure->PublishingType;
+      #if (strlen($enclosure_item['filename_in']) > 0 && $enclosure_item['access'] === 'SKAL PUBLICERES') {
+      if (strlen($enclosure_item['filename_in']) > 0 ) {
+        $item['enclosures'][] = array(
+          'uri' => implode('/', array(
+            trim($meeting['uri'], "/"),
+            $enclosure_item['filename_in'])),
+          'title' => trim((string) $enclosure->Name),
+          'access' => ((string)$enclosure->IsProtected) === 'True'? FALSE : TRUE, //inverting the value
+          'sysid' => (string) $enclosure['ID'],
+          'type' => 'Bilag',
+        );
       }
     }
   }
@@ -383,7 +423,7 @@ function _os2web_sbsys_esdh_mm_import_meeting_agenda_item($meeting, $xml) {
       $non_participants .= (string) $participant->Name . "<br/>";
     }
   }
-  
+
   if (!empty($non_participants)){
     //Add members that did not participate in the bullet discussion as a last bullet point
     $item['bullets'][] = array(
@@ -420,7 +460,6 @@ function _os2web_sbsys_esdh_similar_file_exists($filename) {
 
 /**
  * This function will set up the addenum connections for meetings.
- * @TODO: Rid this of drupal specific code.
  */
 function _os2web_sbsys_esdh_mm_order_addenums($drush = FALSE) {
   if (!lock_acquire(__FUNCTION__)) {
@@ -537,4 +576,30 @@ function _os2web_sbsys_esdh_mm_order_addenums($drush = FALSE) {
   }
   $debug && error_log('MM Import - End of addendums - ' . timer_read('_os2web_sbsys_esdh_mm_order_addenums') . 'ms - ' . memory_get_usage());
   lock_release(__FUNCTION__);
+}
+
+/**
+ * Replaces the src attribute for img tag by providing the valid path to file.
+ *
+ * @param $html
+ * @param $image_folder_uri
+ * @return mixed
+ */
+function _os2web_sbsys_esdh_mm_improve_html($html, $image_folder_uri) {
+
+    preg_match_all('/src="([^"]+)"/',$html, $matches);
+
+    foreach($matches[1] as $path) {
+        $image_path = array_pop(glob(drupal_realpath($image_folder_uri . basename($path) . ".*"))) ;
+        $image_uri = file_create_url( $image_folder_uri . basename($image_path ));
+        if (!empty($image_path)){
+           $html = str_replace( $path, file_create_url($image_uri), $html);
+        }
+       else {
+         $html = str_replace( $path, "", $html);
+        }
+
+    }
+  $html = preg_replace('/<img([^>]+)src=""([^>]*)>/', "", $html);
+  return $html;
 }

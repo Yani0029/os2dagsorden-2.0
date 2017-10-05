@@ -8,16 +8,29 @@
 function os2dagsorden_meeting_views_meetings_search_breadcrumb(){
   global $base_url;
   $q = explode('/',$_GET['q']);
-  $breadcrumb[] = l('Hjem', $base_url);
+  $breadcrumb[] = l('Forsiden', $base_url);
   $breadcrumb[] .= '<span class="breadcrumb-active">Møde søgning</span>';
   drupal_set_breadcrumb($breadcrumb);
 }
 
 function os2dagsorden_meeting_views_meetings_search_help_text(){
-  print '<div class="help-button" title="Her vises de møder der indeholdt møder, 
-  punkter eller bilag der matchede dine søgekriterier. Søgeresultatet vises på mødeniveau i listen."></div>';
+  print '<div class="help-button" id="os2dagsorden_meeting_views_meetings_search_help" aria-label="' . variable_get('os2dagsorden_meetings_search_help_text', 'Her vises de møder der indeholdt møder,
+  punkter eller bilag der matchede dine søgekriterier. Søgeresultatet vises på mødeniveau i listen.') . '"></div>';
 }
 /////////////////////////////////////////header END /////////////////////////////////////////
+
+/////////////////////////////////////////filter start /////////////////////////////////////////
+function os2dagsorden_meeting_views_meetings_search_filter_additional_agendas($nid){
+  //checking if the filtering is needed
+  if (!variable_get('os2dagsorden_meetings_search_include_add_agenda', TRUE)) {
+    $meeting = node_load($nid);
+    if (!empty($meeting->field_os2web_meetings_addendum['und']) && empty($_GET['search_params'])) {
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+/////////////////////////////////////////filter END /////////////////////////////////////////
 
 /////////////////////////////////////////PAGE START/////////////////////////////////////////
 function os2dagsorden_meeting_views_meetings_search_fields_bp_id($meta_data){
@@ -96,6 +109,11 @@ function os2dagsorden_meeting_views_meetings_search_fields_meeting_has_notes($me
     print '<div class="indicator-empty"></div>';
 }
 
+function os2dagsorden_meeting_views_meetings_search_fields_meeting_is_closed($meeting_id){
+  if (variable_get('os2dagsorden_search_meeting_is_closed', FALSE))
+    os2dagsorden_meeting_views_common_meeting_is_closed_else_empty($meeting_id);
+}
+
 function os2dagsorden_meeting_views_meetings_search_fields_meeting_title($data){
   os2dagsorden_meeting_views_common_meeting_title_listed($data);
 }
@@ -125,13 +143,6 @@ function os2dagsorden_meeting_views_meetings_search_fields_placering($meta_data)
       $bpa = node_load($bpa_id);
 
       $to_print = $bpa->title . ': [' . $bullet_point->title . ']';
-      if (os2dagsorden_access_helper_is_touch()){
-	if (mb_strlen($to_print) > 40)
-	  $to_print = mb_substr($to_print, 0, 37) . '...';
-      } else {
-	if (mb_strlen($to_print) > 60)
-	  $to_print = mb_substr($to_print, 0, 57) . '...';
-      }
     }
   }
   if (!empty($to_print)){
@@ -147,11 +158,18 @@ function os2dagsorden_meeting_views_meetings_search_fields_committee($meeting_id
       os2dagsorden_meeting_views_common_meeting_committee($meeting_id); 
 }
 
+function os2dagsorden_meeting_views_meetings_search_fields_location($meeting_id){
+   if (variable_get('os2dagsorden_meetings_search_show_meeting_location', false)) 
+      os2dagsorden_meeting_views_common_meeting_location($meeting_id); 
+}
+
 function os2dagsorden_meeting_views_meetings_search_fields_status($meeting_id){
     if (variable_get('os2dagsorden_meetings_search_show_meeting_status', false)) {
-        $meeting = $meeting = node_load($meeting_id);
+        $meeting = node_load($meeting_id);
         $meeting_type = field_get_items('node', $meeting, 'field_os2web_meetings_type');
-        print $meeting_type[0]['value'];
+	$options = field_info_field(field_os2web_meetings_type);
+
+        print $options['settings']['allowed_values'][$meeting_type[0]['value']];
     }
 }
 /////////////////////////////////////////PAGE END /////////////////////////////////////////

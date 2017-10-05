@@ -38,9 +38,20 @@ function os2web_edoc_esdh_mm_get_import_list() {
    */
   $uris = array();
   foreach (file_scan_directory(variable_get('os2web_edoc_esdh_mm_path', MM_IMPORT_DIR), '/\.xml$/i', array('recurse' => TRUE)) as $xml_file) {
-    $uris[] = array('id' => null, 'uri' => $xml_file->uri);
+    if (is_file(drupal_realpath($xml_file->uri))) {
+      libxml_use_internal_errors(true);
+      $manifest = simplexml_load_string(utf8_for_xml(file_get_contents(drupal_realpath($xml_file->uri))), 'SimpleXMLElement', LIBXML_NOWARNING);
+      libxml_clear_errors();
+      libxml_use_internal_errors(false);
+
+      if (is_object($manifest)) {
+        $committee = (string) array_shift($manifest->xpath("/Meeting/Committee"));
+        $meeting_date = (string) array_shift($manifest->xpath("/Meeting/MeetingDate"));
+      }
+    }
+
+    $uris[] = array('id' => _os2web_edoc_esdh_generate_meeting_id($meeting_date, $committee), 'uri' => $xml_file->uri);
   }
-#error_log(print_r($xml_file, 1 ));
   return $uris;
 }
 
@@ -57,9 +68,15 @@ function os2web_edoc_esdh_mm_get_import_list() {
  */
 function utf8_for_xml($string)
 {
-    $replace_me =  variable_get('os2web_edoc_esdh_banned_special_char', "&#xC;");
-    $str_new = str_replace($replace_me, "", $string);
-    return $str_new;
+  if (variable_get('os2web_edoc_esdh_banned_activate_regex', FALSE)) {//using regex
+    $replace_me =  variable_get('os2web_edoc_esdh_banned_special_regex','');
+    $str_new = preg_replace($replace_me, "", $string);  
+  }
+  else {//using CSV list
+    $replace_me =  variable_get('os2web_edoc_esdh_banned_special_char','');
+    $str_new = str_replace(explode(',', $replace_me), "", $string);
+  }
+  return $str_new;
 }
 
 /**
@@ -103,12 +120,7 @@ function os2web_edoc_esdh_mm_import_meeting($meeting) {
 	$committee = (string) array_shift($manifest->xpath("/Meeting/Committee"));
 	$ref_state = (string) array_shift($manifest->xpath("/Meeting/MeetingState"));
 	$meeting_date = (string) array_shift($manifest->xpath("/Meeting/MeetingDate"));
-	//$meeting_id = $meeting_agenda->xpath('MeetingAgendaItems/MeetingAgendaItem/Document/@documentid');
-	//$meeting_id = (string) $meeting_id[0][documentid];
-	$meeting_id = crc32($meeting_date . ' ' . $committee);//generated meeting_id
-         if ($meeting_id > 2147483647){
-           $meeting_id = substr($meeting_id, 0,9);//mysql int out of range fix
-         }
+	$meeting_id = _os2web_edoc_esdh_generate_meeting_id($meeting_date, $committee);//generated meeting_id
 	$meeting_pdf = $meeting_agenda->xpath('PDFDocument');
 	$meeting_pdf = (string) $meeting_pdf[0];
 	$meeting_state = $meeting_agenda->xpath('AgendaType');
@@ -124,13 +136,6 @@ function os2web_edoc_esdh_mm_import_meeting($meeting) {
 	  
 	// Collecting agenda items
 	$meeting_agendas_items = $meeting_agenda->xpath('MeetingAgendaItems'); //$manifest->xpath("/Meeting/MeetingAgendaTypes/MeetingAgendaType/MeetingAgendaItems");
-	
-	// Check if the committee is allowed to publish.
-	$publish_committee = array_map('trim', explode(',', variable_get('os2web_edoc_esdh_approved_committees', MM_DEFAULT_APPROVED)));
-	if ($committee == '' || !in_array($committee, $publish_committee)) {
-	  watchdog('eDoc MM', 'Ignored agenda from "%committee" .', array('%committee' => $committee));
-	  return FALSE;
-	}
 
 	// Fix dates.
 	$date_obj = date_create($meeting_date);
@@ -152,10 +157,13 @@ function os2web_edoc_esdh_mm_import_meeting($meeting) {
 	  'meeting_sub_id' => $meeting_id,
 	  'committee' => $committee,
 	  'committee_name' => $committee,
+      'committee_id' => _os2web_edoc_esdh_generate_committee_id($committee),
 	  'title' => $committee,
 	  'uri' => strstr($file , 'eDocAgendaPublishing.xml', TRUE),
+          'path' => drupal_realpath($file),
 	  'meeting_date' => $meeting_date,
 	  'meeting_date_start' => $meeting_date,
+          'meeting_date_finish' => $meeting_date,
 	  'meeting_type' => $meeting_type,
 	  'type' => $meeting_type,
 	  'meeting_state' => $meeting_state,
@@ -200,6 +208,13 @@ function os2web_edoc_esdh_mm_import_meeting($meeting) {
  *   Meeting_struct array for an accepted import, else FALSE
  */
 function _os2web_edoc_esdh_mm_import_meeting_agenda(&$meeting, $agenda_xml) {
+  // Check if the committee is allowed to publish.
+  $publish_committee = array_map('trim', explode(',', variable_get('os2web_edoc_esdh_approved_committees', MM_DEFAULT_APPROVED)));
+  if ($meeting['committee'] == '' || !in_array($meeting['committee'], $publish_committee)) {
+    watchdog('eDoc MM', 'Ignored agenda from "%committee" .', array('%committee' => $meeting['committee']));
+    return FALSE;
+  }
+
   $meeting['items'] = array();
   $agenda = $meeting;
   // Only add the agenda if its PDF exists.
@@ -244,6 +259,11 @@ function _os2web_edoc_esdh_mm_import_meeting_agenda_item($meeting, $xml) {
   $xml_item['document_type'] = (string) $xml_item_document->PublishingType;
   $xml_item['agenda_type'] = (string) $meeting->AgendaType;
   $xml_item['documentid'] = (string) $xml_item_document['documentid'];
+  if (empty($xml_item['documentid']) || $xml_item['documentid'] == '') {
+    $pdf_name = split('.', $xml_item['pdf']);
+    $xml_item['documentid'] = $pdf_name[0];
+  }
+
   $xml_item['full_text'] = trim((string) $xml->FullText);
 
   if(variable_get('os2web_edoc_esdh_nl2br', TRUE)){
@@ -252,7 +272,7 @@ function _os2web_edoc_esdh_mm_import_meeting_agenda_item($meeting, $xml) {
 
   $item = array(
     'id' => $xml_item['number'],
-    'sysid' => crc32($meeting['committee'] . ' ' . $meeting['meeting_date'] . ' ' . $xml_item['documentid']),//generated id - because there is not unique ID for the bullet point
+    'sysid' => _os2web_edoc_esdh_generate_item_id($meeting['committee'], $meeting['meeting_date'], $xml_item['documentid']),//generated id - because there is not unique ID for the bullet point
     'title' => 'Punkt ' . $xml_item['number'] . ' ' . $xml_item['name'],
     'access' => $xml_item['document_type'],
     'bullets' => array(),
@@ -268,79 +288,90 @@ function _os2web_edoc_esdh_mm_import_meeting_agenda_item($meeting, $xml) {
   if ($item['access'] !== 'SKAL PUBLICERES' || stripos($meeting['agenda_access'], 'lukket') !== FALSE) {
     $item['access'] = 'Lukket';
   }
-  if (variable_get('os2web_edoc_esdh_bullet_source', 'xml') == 'xml'){
-    //Process item body
-    if (!empty($xml_item['full_text'])){
-      $item['bullets'][] = array(
-          'title' => 'Beskrivelse',
-          'body' => $xml_item['full_text'],
-          'sysid' => $xml_item['documentid'] . $xml_item['number'],
-      );
-    }
 
-    // Process bullets.
-    foreach ($xml_item_bullet->Attachment as $bullet_xml) {
-      $bullet_title = (string) $bullet_xml->NeutralTitle;
-      $bullet_body = (string) trim($bullet_xml->FullText);
-      $bullet_id = (string) $bullet_xml['attachmentid'];
-      $bullet_access = (string) $bullet_xml->PublishingType;
-      if (empty($bullet_body)) {
-        $bullet_body = "Intet indhold";
+  if ($item['access'] !== 'Lukket' || variable_get('os2web_edoc_esdh_import_closed_agenda', FALSE)){
+    if (variable_get('os2web_edoc_esdh_bullet_source', 'xml') == 'xml'){
+      //Process item body
+      if (!empty($xml_item['full_text'])){
+        $item['bullets'][] = array(
+            'title' => 'Beskrivelse',
+            'body' => $xml_item['full_text'],
+            'sysid' => $xml_item['documentid'] . $xml_item['number'],
+        );
       }
-      else {
-        if($bullet_access !== 'SKAL PUBLICERES') {
-          $bullet_body = "Dette er et lukket punkt. Du kan læse selve indstillingen" . $bullet_xml['access'];
+  
+      // Process bullets.
+      foreach ($xml_item_bullet->Attachment as $bullet_xml) {
+        $bullet_title = (string) $bullet_xml->NeutralTitle;
+        $bullet_body = (string) trim($bullet_xml->FullText);
+        $bullet_id = (string) $bullet_xml['attachmentid'];
+        $bullet_access = (string) $bullet_xml->PublishingType;
+        if (empty($bullet_body)) {
+          $bullet_body = "Intet indhold";
+        }
+        else {
+          if($bullet_access !== 'SKAL PUBLICERES') {
+            $bullet_body = "Dette er et lukket punkt. Du kan læse selve indstillingen" . $bullet_xml['access'];
+          }
+        }
+        if (!empty($bullet_title)) {
+          $item['bullets'][] = array(
+            'title' => (string) $bullet_title,
+            'body' => (string) $bullet_body,
+            'sysid' => $bullet_id,
+          );
+        }
+        
+        // Process enclosure, if any
+        $enclosure_item['filename_in'] = (string) $bullet_xml->PDFDocument;
+        $enclosure_item['access'] = (string) $bullet_xml->PublishingType;
+        if (strlen($enclosure_item['filename_in']) > 0 && $enclosure_item['access'] == 'SKAL PUBLICERES') {
+          $item['enclosures'][] = array(
+            'uri' => implode('/', array(
+            trim($meeting['uri'], "/"),
+            $xml_item['pdf'])),
+            'title' => trim((string) $bullet_xml->Title),
+            //'sysid' => 'bilag_' . $bullet_id,
+            'sysid' => $bullet_id,
+            'access' => TRUE,
+            'filetype' => '.pdf',
+            'type' => 'Bilag',
+          );
         }
       }
-      if (!empty($bullet_title)) {
-        $item['bullets'][] = array(
-          'title' => (string) $bullet_title,
-          'body' => (string) $bullet_body,
-          'sysid' => $bullet_id,
-        );
-      }
-      
-      // Process enclosure, if any
-      $enclosure_item['filename_in'] = (string) $bullet_xml->PDFDocument;
-      $enclosure_item['access'] = (string) $bullet_xml->PublishingType;
-      if (strlen($enclosure_item['filename_in']) > 0 && $enclosure_item['access'] == 'SKAL PUBLICERES') {
-        $item['enclosures'][] = array(
-          'uri' => implode('/', array(
-          trim($meeting['uri'], "/"),
-          $xml_item['pdf'])),
-          'title' => trim((string) $bullet_xml->Title),
-          'sysid' => 'bilag_' . $bullet_id,
-          'access' => TRUE,
-          'filetype' => '.pdf',
-        );
-      }
-    }
-  } else {
-    //skipping content and importing just one PDF with all attachment gathered there
-    $item['enclosures'][] = array(
-       'uri' => implode('/', array(
-       trim($meeting['uri'], "/"),
-       $xml_item['pdf'])),
-       'title' => variable_get('os2web_edoc_esdh_empty_bullet_title','Indhold'),
-       'sysid' => 'bilag_' . $xml_item['documentid'],
-       'access' => TRUE,
-       'filetype' => '.pdf',
-       'is_bp_summary' => TRUE,
-     );
-    foreach ($xml_item_bullet->Attachment as $bullet_xml) {
-     $bullet_id = (string) $bullet_xml['attachmentid'];
-      $enclosure_item['filename_in'] = (string) $bullet_xml->PDFDocument;
-      $enclosure_item['access'] = (string) $bullet_xml->PublishingType;
-      if (strlen($enclosure_item['filename_in']) > 0 && $enclosure_item['access'] == 'SKAL PUBLICERES') {
-        $item['enclosures'][] = array(
-          'uri' => implode('/', array(
-          trim($meeting['uri'], "/"),
-          $enclosure_item['filename_in'])),
-          'title' => trim((string) $bullet_xml->Title),
-          'sysid' => 'bilag_' . $bullet_id,
-          'access' => TRUE,
-          'filetype' => '.pdf',
-        );
+    } else {
+      //skipping content and importing just one PDF with all attachment gathered there
+      $item['enclosures'][] = array(
+         'uri' => implode('/', array(
+         trim($meeting['uri'], variable_get('os2web_edoc_esdh_mm_is_abs',FALSE)? "" : "/"),
+         $xml_item['pdf'])),
+         'title' => variable_get('os2web_edoc_esdh_empty_bullet_title','Indhold')  . "_" . $xml_item['number'],
+         //'sysid' => 'bilag_' . $xml_item['documentid'],
+          'sysid' => $xml_item['documentid'],
+         'access' => TRUE,
+         'filetype' => '.pdf',
+         'is_bp_summary' => TRUE,
+       );
+      foreach ($xml_item_bullet->Attachment as $bullet_xml) {
+        $bullet_id = (string) $bullet_xml['attachmentid'];
+        if (empty($bullet_id)) {
+          $bullet_id = $xml_item['documentid'];
+        }
+        $enclosure_item['filename_in'] = (string) $bullet_xml->PDFDocument;
+        $enclosure_item['access'] = (string) $bullet_xml->PublishingType;
+        if (strlen($enclosure_item['filename_in']) > 0 && $enclosure_item['access'] == 'SKAL PUBLICERES') {
+          $item['enclosures'][] = array(
+            'uri' => implode('/', array(
+            trim($meeting['uri'], variable_get('os2web_edoc_esdh_mm_is_abs',FALSE)? "" : "/"),
+            $enclosure_item['filename_in'])),
+            'title' => trim((string) $bullet_xml->Title),
+            //'sysid' => 'bilag_' . $bullet_id,
+            'sysid' => $bullet_id,
+            'access' => TRUE,
+            'filetype' => '.pdf',
+            'type' => 'Bilag',
+          );
+        }
       }
     }
   }
@@ -373,7 +404,6 @@ function _os2web_edoc_esdh_similar_file_exists($filename) {
 
 /**
  * This function will set up the addenum connections for meetings.
- * @TODO: Rid this of drupal specific code.
  */
 function _os2web_edoc_esdh_mm_order_addenums($drush = FALSE) {
   if (!lock_acquire(__FUNCTION__)) {
@@ -491,4 +521,48 @@ function _os2web_edoc_esdh_mm_order_addenums($drush = FALSE) {
   }
   $debug && error_log('MM Import - End of addendums - ' . timer_read('_os2web_edoc_esdh_mm_order_addenums') . 'ms - ' . memory_get_usage());
   lock_release(__FUNCTION__);
+}
+
+/**
+ * This function generates the meeting xml ID, when it is missing in the XML.
+ *
+ * @param $meeting_date
+ * @param $committee
+ * @return int|string
+ */
+function _os2web_edoc_esdh_generate_meeting_id($meeting_date, $committee) {
+  $meeting_id = sprintf("%u", crc32($meeting_date . ' ' . $committee));//generated meeting_id
+  if ($meeting_id > 2147483647){
+    $meeting_id = substr($meeting_id, 0,9);//mysql int out of range fix
+  }
+  return $meeting_id;
+}
+
+/**
+ * This function generates the ID for bullet point, when it is missing in the XML.
+ *
+ * @param $committee
+ * @param $meeting_date
+ * @param $doc_id
+ */
+function _os2web_edoc_esdh_generate_item_id($committee, $meeting_date, $doc_id) {
+  $item_id = sprintf("%u", crc32($committee . ' ' . $meeting_date . ' ' . $doc_id));
+  if ($item_id > 2147483647){
+    $item_id = substr($item_id, 0,9);//mysql int out of range fix
+  }
+  return $item_id;
+}
+
+/**
+ * This function generates the ID for committee, when it is missing in the XML.
+ *
+ * @param $committee_name
+ * @return int|string
+ */
+function _os2web_edoc_esdh_generate_committee_id($committee_name) {
+  $committee_id = sprintf("%u", crc32($committee_name));
+  if ($committee_id > 2147483647){
+    $committee_id = substr($committee_id, 0,9);//mysql int out of range fix
+  }
+  return $committee_id;
 }

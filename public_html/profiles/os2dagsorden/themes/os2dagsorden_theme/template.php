@@ -25,14 +25,26 @@
  * @param mixed &$variables variables
  * @return none
  */
-function os2dagsorden_theme_preprocess_page(&$variables) 
-{    
+function os2dagsorden_theme_preprocess_page(&$variables)
+{   drupal_add_library('system', 'ui.draggable');
+    drupal_add_js(drupal_get_path('theme', 'os2dagsorden_theme') . '/js/jquery.ui.touch-punch.min.js');
     drupal_add_js(drupal_get_path('theme', 'os2dagsorden_theme') . '/js/os2dagsorden_theme.js');
-    drupal_add_js('add_show_hide_menu_behaviour(' . variable_get('os2dagsorden_collapse_menu', true) . ');', 'inline');
-    drupal_add_js('add_tablet_orientation_listener();', 'inline');
+
+    if (!os2dagsorden_access_helper_is_touch()) {
+      drupal_add_js('add_show_hide_menu_behaviour(' . variable_get('os2dagsorden_collapse_menu', true) . ');', 'inline');
+    } else {
+      drupal_add_js('add_show_hide_menu_behaviour(' . variable_get('os2dagsorden_collapse_menu_touch', true) . ');', 'inline');
+    }
+    drupal_add_js(array('os2dagsorden_settings' => array('body_font_size' => variable_get('os2dagsorden_body_text_size', '13'))), array('type' => 'setting'));
+    drupal_add_js(array('os2dagsorden_settings' => array('title_font_size' => variable_get('os2dagsorden_title_text_size', '13'))), array('type' => 'setting'));
+    drupal_add_js(array('os2dagsorden_settings' => array('sidepane_arrow_position' => variable_get('os2dagsorden_right_sidebar_arrow_position_radios', 'classic'))), array('type' => 'setting'));
+
+    os2dagsorden_theme_hide_menu_on_pages();
+
     drupal_add_js('add_indicator_help_text();', 'inline');
-    drupal_add_js('hide_print_buttons();', 'inline');
-    drupal_add_js('resize_listener();', 'inline');
+    //DAGS-298 enabling print for iPad
+    //drupal_add_js('hide_print_buttons();', 'inline');
+    //drupal_add_js('resize_listener();', 'inline');
     if (variable_get('os2dagsorden_show_search_block_title', 'true')==='false')
         drupal_add_js('hide_search_block_title()', 'inline');
     $view = views_get_page_view();
@@ -41,7 +53,7 @@ function os2dagsorden_theme_preprocess_page(&$variables)
         if ($view->name == 'meeting_details') {
             //adding expand/collapse behaviour to meeting details view
             $os2dagsorden_expand_all_bullets= variable_get('os2dagsorden_expand_all_bullets', false)?true:'false';
-            drupal_add_js('bullet_point_add_expand_behaviour("'. $base_path .'?q=", ' . variable_get('os2dagsorden_expand_attachment', true) . ',  ' . $os2dagsorden_expand_all_bullets . ' , ' . variable_get('os2dagsorden_expand_attachment_onload', 'false') . ')', 'inline');
+            drupal_add_js('bullet_point_add_expand_behaviour("'. $base_path .'?q=", ' . variable_get('os2dagsorden_expand_attachment', true) . ',  ' . $os2dagsorden_expand_all_bullets . ' , ' . variable_get('os2dagsorden_expand_attachment_onload', false) . ')', 'inline');
             drupal_add_js('open_all_bilag_case_bullet_points(' . variable_get('os2dagsorden_expand_bilags', "true") . ','. variable_get('os2dagsorden_expand_cases', "false") .')', 'inline');
             $variables['views'] = '';  
             
@@ -70,6 +82,8 @@ function os2dagsorden_theme_preprocess_page(&$variables)
 		    drupal_add_js(drupal_get_path('module', 'os2dagsorden_annotator') . '/lib/annotator-full.min.js');	    
 		    //drupal_add_js(drupal_get_path('module', 'os2dagsorden_annotator') . '/lib/touch-plugin/annotator.touch-no-add.min.js');
 		    //drupal_add_js(drupal_get_path('module', 'os2dagsorden_annotator') . '/lib/touch-plugin/annotator.touch.min.js');
+		    $your_passed_info = array('create_note' => 'test');
+		    drupal_add_js(array('your_module_name' => $your_passed_info), 'setting');
 		    drupal_add_js(drupal_get_path('module', 'os2dagsorden_annotator') . '/lib/touch-plugin/annotator.touch-syddjurs.min.js');
 		    drupal_add_js(drupal_get_path('module', 'os2dagsorden_annotator') . '/lib/json2.js');
 		    drupal_add_js(drupal_get_path('module', 'os2dagsorden_annotator') . '/lib/XPath.js');
@@ -94,7 +108,7 @@ function os2dagsorden_theme_preprocess_page(&$variables)
       $destination = $_GET['destination'];
       $destination = explode('/', $destination);
       
-      $breadcrumb[] = l('Hjem', $base_url);
+      $breadcrumb[] = l('Forsiden', $base_url);
       $breadcrumb[] .= l('Mødedetaljer', 'meeting/' . $destination[1]);
       
       if (isset($destination[3]))//bullet point
@@ -103,6 +117,28 @@ function os2dagsorden_theme_preprocess_page(&$variables)
       $breadcrumb[] .= '<span class="breadcrumb-active">Opret talepapir</span>';
       drupal_set_breadcrumb($breadcrumb);
     }
+}
+
+/**
+ * Returns HTML for a breadcrumb trail.
+ *
+ * @param $variables
+ *   An associative array containing:
+ *   - breadcrumb: An array containing the breadcrumb links.
+ */
+function os2dagsorden_theme_breadcrumb($variables) {
+  $breadcrumb = $variables['breadcrumb'];
+
+  if (!empty($breadcrumb)) {
+    // Provide a navigational heading to give context for breadcrumb links to
+    // screen-reader users. Make the heading invisible with .element-invisible.
+    $output = '<h2 class="element-invisible">' . t('You are here') . '</h2>';
+    if ( count($breadcrumb) > 1 ){
+      $output .= '<div class="breadcrumb">' . implode(' » ', $breadcrumb) . '</div>';
+    }
+
+    return $output;
+  }
 }
 
 /**
@@ -126,7 +162,7 @@ function os2dagsorden_theme_date_nav_title($params)
             $date_arg = $date_info->year;
             break;
         case 'month':
-            $format = !empty($format) ? $format : (empty($date_info->mini) ? 'F Y' : 'F');
+            $format = !empty($format) ? $format : (empty($date_info->mini) ? 'F Y' : 'F Y');
             $title = date_format_date($date_info->min_date, 'custom', $format);
             $date_arg = $date_info->year . '-' . date_pad($date_info->month);
             break;
@@ -275,7 +311,7 @@ function os2dagsorden_theme_menu_local_task($variables) {
   $href = explode('/', $link['href']);
   $node = node_load($href[1]);
   
-  if ($link['path'] === 'node/%/edit' && $node->type !== 'page')//disabling edit tab, if only node type is not page
+  if ($link['path'] === 'node/%/edit' && $node->type !== 'os2web_page')//disabling edit tab, if only node type is not page
     return '';
   else if ($link['path'] === 'node/%/view')//disabling view tab
     return '';
@@ -283,4 +319,19 @@ function os2dagsorden_theme_menu_local_task($variables) {
     return '';
   else 
     return theme_menu_local_task($variables);
+}
+
+function os2dagsorden_theme_hide_menu_on_pages() {
+  if (os2dagsorden_access_helper_is_touch()) {
+    $pages = variable_get('os2dagsorden_collapse_menu_touch_pages', 'meetings/print');
+    $pages = explode(PHP_EOL, $pages);
+    foreach ($pages as $page) {
+      if (strcmp($page, current_path()) == 0) {
+        drupal_add_js('hide_side_menu(false);', 'inline');
+        return;
+      }
+    }
+    //no pages forcing menu to be hidden, can add orientation listener
+    drupal_add_js('add_tablet_orientation_listener();', 'inline');
+  }
 }
